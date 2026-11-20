@@ -74,10 +74,53 @@ CREATE TABLE IF NOT EXISTS audit_log (
     version_no           INTEGER,
     summary              TEXT NOT NULL
 );
+
+-- A purged month keeps two compact data sets instead of its per-shipment
+-- ledger rows: the minimal facts needed to recompute zone summaries under
+-- any knowledge version, and the sequence numbers still reserved for
+-- duplicate detection. Both are written in the same purge transaction that
+-- removes the original shipments.
+CREATE TABLE IF NOT EXISTS purged_months (
+    month                TEXT PRIMARY KEY,
+    purged_at            TEXT NOT NULL,
+    retained_row_count   INTEGER NOT NULL,
+    retained_total_boxes INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS retained_shipments (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    month                TEXT NOT NULL,
+    sku                  TEXT NOT NULL,
+    occurred_at_us       INTEGER NOT NULL,
+    boxes                INTEGER NOT NULL CHECK (boxes > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_retained_month
+    ON retained_shipments(month, occurred_at_us, id);
+CREATE INDEX IF NOT EXISTS idx_retained_month_sku
+    ON retained_shipments(month, sku);
+
+CREATE TABLE IF NOT EXISTS retained_sequences (
+    month                TEXT NOT NULL,
+    sequence_no          TEXT NOT NULL,
+    PRIMARY KEY (sequence_no)
+);
+CREATE INDEX IF NOT EXISTS idx_retained_seq_month ON retained_sequences(month);
 """
 
 # Append-only protections. Facts and the knowledge ledger are never rewritten;
 # corrections are new versions, not edits.
+#
+# The shipments DELETE trigger is defined separately because month-detail
+# retention is the one sanctioned path that removes per-shipment rows: the
+# purge transaction drops this trigger, deletes the month's ledger rows, then
+# recreates it, all atomically. Nothing else may delete shipments.
+SHIPMENTS_DELETE_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS shipments_no_delete
+BEFORE DELETE ON shipments BEGIN
+    SELECT RAISE(ABORT, 'shipment facts are immutable');
+END;
+"""
+
 IMMUTABLE_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS months_no_update
 BEFORE UPDATE ON months BEGIN
@@ -91,10 +134,7 @@ CREATE TRIGGER IF NOT EXISTS shipments_no_update
 BEFORE UPDATE ON shipments BEGIN
     SELECT RAISE(ABORT, 'shipment facts are immutable');
 END;
-CREATE TRIGGER IF NOT EXISTS shipments_no_delete
-BEFORE DELETE ON shipments BEGIN
-    SELECT RAISE(ABORT, 'shipment facts are immutable');
-END;
+""" + SHIPMENTS_DELETE_TRIGGER + """
 CREATE TRIGGER IF NOT EXISTS versions_no_update
 BEFORE UPDATE ON knowledge_versions BEGIN
     SELECT RAISE(ABORT, 'knowledge versions are immutable');
@@ -130,6 +170,30 @@ END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete
 BEFORE DELETE ON audit_log BEGIN
     SELECT RAISE(ABORT, 'audit log is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS purged_months_no_update
+BEFORE UPDATE ON purged_months BEGIN
+    SELECT RAISE(ABORT, 'purged month records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS purged_months_no_delete
+BEFORE DELETE ON purged_months BEGIN
+    SELECT RAISE(ABORT, 'purged month records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS retained_shipments_no_update
+BEFORE UPDATE ON retained_shipments BEGIN
+    SELECT RAISE(ABORT, 'retained shipment facts are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS retained_shipments_no_delete
+BEFORE DELETE ON retained_shipments BEGIN
+    SELECT RAISE(ABORT, 'retained shipment facts are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS retained_sequences_no_update
+BEFORE UPDATE ON retained_sequences BEGIN
+    SELECT RAISE(ABORT, 'retained sequence numbers are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS retained_sequences_no_delete
+BEFORE DELETE ON retained_sequences BEGIN
+    SELECT RAISE(ABORT, 'retained sequence numbers are immutable');
 END;
 """
 

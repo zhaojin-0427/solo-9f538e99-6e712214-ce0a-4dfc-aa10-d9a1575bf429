@@ -40,6 +40,10 @@ COLDCHAIN_DB=/tmp/cc.sqlite3 gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 
    同一版号内同一 SKU 的区间不得重叠；整组提交即整组替换，并生成新知识版号。
 3. **核对月报**：选择月份和知识版号（留空=最新版），查看各温区箱数、每笔对应流水
    及其依据区间，以及未归类流水。空档期间的出库自动列为未归类。
+4. **清理过保留期明细**：在月报页选择一个**已冻结月份**并勾选确认后，库管可清理该月
+   逐笔流水。清理成功后在线库移除该月 `shipments` 逐笔记录，只保留重算汇总所需的精简
+   事实（SKU、出库时刻、箱数，仍按笔存储）与查重所需的流水号；月报页与 `/api/report`
+   会标明「明细已清理」。清理后该月仍拒绝重传，其他月份也不得复用已清理的流水号。
 
 示例文件：`examples/2026-03.csv`（可用 `python examples/make_example.py` 重新生成）。
 
@@ -56,6 +60,12 @@ COLDCHAIN_DB=/tmp/cc.sqlite3 gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 
 | 更正/查询交错不混用新旧 | 写用 `BEGIN IMMEDIATE` 串行化；查询在一个读事务里同时取月份事实、版号与区间 |
 | 非法/失败不产生半版 | 校验先于写入；任何异常整体回滚；版本号和区间在同一事务提交 |
 | 重启后旧版可追查 | 全部状态在 SQLite（WAL，`synchronous=FULL`），容器卷持久化 |
+| 过保留期可清理逐笔明细 | 月报页确认后，单个 `BEGIN IMMEDIATE` 事务内把逐笔流水替换为 `retained_shipments` 精简事实与 `retained_sequences` 查重号，并登记 `purged_months`；清理期间临时摘除并在同事务重装 `shipments_no_delete` 触发器 |
+| 清理后汇总仍可按任意版号重算 | 保留每笔的 SKU、UTC 时刻与箱数，`build_report` 对已清理月改读精简事实，温区/未归类的箱数与笔数口径不变；同一 SKU 同时刻多笔出库仍逐笔计数 |
+| 清理后拒绝重传、旧号不得复用 | `months` 行保留使同月重传仍返回 409；上传时额外在 `retained_sequences` 查重，跨月复用旧流水号同样 409 |
+| 清理与读取/上传交错只见到完整状态 | 清理走 `BEGIN IMMEDIATE` 串行化，读事务持快照，要么看到清理前完整状态、要么看到清理后完整状态 |
+| 写入失败保留原月结、重复确认幂等 | 任一步失败整体回滚（含触发器还原）；对已清理月份再次确认直接沿用既有结果，不重复写数据或审计 |
+| 清理结果重启后仍有效 | 精简事实、查重号与清理记录均为只追加表（触发器禁止 UPDATE/DELETE），随 SQLite 卷持久化 |
 
 并发更正采用「基准版号」乐观并发控制：提交时必须声明所依据的版本号，若已不是
 最新版则返回 409 要求刷新重试，因此不会把两次不同更正悄悄合并或覆盖。
@@ -69,8 +79,10 @@ COLDCHAIN_DB=/tmp/cc.sqlite3 gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 
 | GET | `/api/versions` | 知识版号列表 |
 | POST | `/api/versions` | `{"sku","intervals":[{"zone","valid_from","valid_to"}],"reason","base_version"}` |
 | GET | `/api/versions/<n>` | 某版全部 SKU 区间 |
-| GET | `/api/report?month=YYYY-MM&version=<n>` | 月报（省略 `version` 用最新版） |
-| GET | `/api/audit` | 最近 200 条审计记录 |
+| GET | `/api/report?month=YYYY-MM&version=<n>` | 月报（省略 `version` 用最新版）；已清理明细的月份返回 `details_purged=true` 与 `purged_at`，且逐笔条目不含流水号/时刻文本 |
+| POST | `/api/months/YYYY-MM/purge` | JSON `{"confirm": true}` 清理该月逐笔明细；未确认返回 400，未冻结月份返回 404，重复确认返回 200 且 `already_purged=true` |
+| POST | `/report/purge` | 月报页表单（字段 `month`、`confirm`），完成后跳回月报页 |
+| GET | `/api/audit` | 最近 200 条审计记录（含 `purge_month`） |
 | GET | `/healthz` | 健康检查 |
 
 `base_version` 为 `null` 仅允许用于空账本创建 v1；否则必须是当前最新版号。
@@ -83,7 +95,9 @@ python -m unittest discover -s tests -v
 
 覆盖：月结冻结与重复拒绝、CSV 各类非法输入、起含止不含边界、空档未归类、
 重叠/倒序区间拒绝、补登不改旧版、基准版号冲突、并发更正串行化、查询快照一致、
-重启后旧版可追查、数据库层不可变触发器等。
+重启后旧版可追查、数据库层不可变触发器，以及月结明细清理（精简事实重算、
+同 SKU 同时刻分别计数、重传与旧号复用拦截、幂等确认、失败回滚、重启持久化、
+清理并发串行化）等。
 
 ## 目录
 
@@ -92,6 +106,7 @@ coldchain/
   app.py        Flask 路由与页面/API
   facts.py      月结 CSV 校验与冻结
   knowledge.py  温区版本、区间校验、分类与报表
+  retention.py  过保留期月份的逐笔明细清理
   db.py         SQLite schema、触发器、事务
   timeutil.py   UTC 解析与规范化
   templates/    页面

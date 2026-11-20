@@ -355,6 +355,10 @@ def build_report(conn, month, requested_version=None):
         month_row = conn.execute("SELECT * FROM months WHERE month = ?", (month,)).fetchone()
         if month_row is None:
             raise NotFoundError(f"月份 {month} 尚未上传出库事实")
+        purged_row = conn.execute(
+            "SELECT * FROM purged_months WHERE month = ?", (month,)
+        ).fetchone()
+        details_purged = purged_row is not None
         version_row = resolve_version(conn, requested_version)
         version_no = version_row["version_no"] if version_row else None
 
@@ -378,11 +382,23 @@ def build_report(conn, month, requested_version=None):
             for sku, items in grouped.items()
         }
 
-        shipments = conn.execute(
-            "SELECT id, sequence_no, sku, occurred_at, occurred_at_us, boxes"
-            " FROM shipments WHERE month = ? ORDER BY occurred_at_us, id",
-            (month,),
-        ).fetchall()
+        if details_purged:
+            # Per-shipment ledger rows have been removed. The retained compact
+            # facts still carry every shipment's SKU, instant and boxes, so the
+            # zone and unclassified counts are recomputed identically under
+            # the selected knowledge version; sequence-level detail is gone.
+            shipments = conn.execute(
+                "SELECT id, sku, occurred_at_us, boxes"
+                " FROM retained_shipments WHERE month = ?"
+                " ORDER BY occurred_at_us, id",
+                (month,),
+            ).fetchall()
+        else:
+            shipments = conn.execute(
+                "SELECT id, sequence_no, sku, occurred_at, occurred_at_us, boxes"
+                " FROM shipments WHERE month = ? ORDER BY occurred_at_us, id",
+                (month,),
+            ).fetchall()
 
     buckets = {}
     unclassified = []
@@ -392,9 +408,8 @@ def build_report(conn, month, requested_version=None):
         intervals, starts = indexed.get(shipment["sku"], ((), ()))
         interval = classify(shipment["occurred_at_us"], intervals, starts)
         record = {
-            "sequence_no": shipment["sequence_no"],
             "sku": shipment["sku"],
-            "occurred_at": shipment["occurred_at"],
+            "occurred_at_us": shipment["occurred_at_us"],
             "boxes": shipment["boxes"],
             "basis": (
                 {
@@ -406,8 +421,13 @@ def build_report(conn, month, requested_version=None):
                 else None
             ),
         }
+        if not details_purged:
+            # Identity-level detail exists only for months that were not purged.
+            record["sequence_no"] = shipment["sequence_no"]
+            record["occurred_at"] = shipment["occurred_at"]
         if interval is None:
-            record["sku_intervals"] = sku_interval_json.get(shipment["sku"], [])
+            if not details_purged:
+                record["sku_intervals"] = sku_interval_json.get(shipment["sku"], [])
             unclassified.append(record)
             continue
         bucket = buckets.setdefault(
@@ -426,6 +446,8 @@ def build_report(conn, month, requested_version=None):
 
     return {
         "month": month,
+        "details_purged": details_purged,
+        "purged_at": purged_row["purged_at"] if details_purged else None,
         "month_row": {
             "month": month_row["month"],
             "row_count": month_row["row_count"],
@@ -468,10 +490,7 @@ def _shipment_json(item):
         }
 
     payload = {
-        "sequence_no": item["sequence_no"],
         "sku": item["sku"],
-        "occurred_at": item["occurred_at"],
-        "occurred_at_display": display_utc(item["occurred_at"]),
         "boxes": item["boxes"],
         "basis_interval": (
             {
@@ -485,6 +504,10 @@ def _shipment_json(item):
             else None
         ),
     }
+    if "sequence_no" in item:
+        payload["sequence_no"] = item["sequence_no"]
+        payload["occurred_at"] = item["occurred_at"]
+        payload["occurred_at_display"] = display_utc(item["occurred_at"])
     if "sku_intervals" in item:
         payload["sku_intervals"] = [interval_json(x) for x in item["sku_intervals"]]
     return payload
@@ -496,6 +519,8 @@ def report_json(report):
         "month": report["month"],
         "version": report["version"],
         "month_fact": report["month_row"],
+        "details_purged": report["details_purged"],
+        "purged_at": report.get("purged_at"),
         "zones": [
             {
                 "zone": bucket["zone"],

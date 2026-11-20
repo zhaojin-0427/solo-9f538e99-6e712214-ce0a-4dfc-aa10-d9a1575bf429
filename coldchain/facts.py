@@ -248,6 +248,18 @@ def ingest_month(conn, raw, filename, expected_month=None):
                 raise ConflictError(
                     f"流水号 {clash['sequence_no']} 已存在于其他月份，流水号必须全局唯一"
                 )
+            # Sequence numbers of purged months stay reserved even though their
+            # ledger rows have been removed.
+            retained_clash = conn.execute(
+                f"SELECT sequence_no, month FROM retained_sequences"
+                f" WHERE sequence_no IN ({placeholders}) LIMIT 1",
+                chunk,
+            ).fetchone()
+            if retained_clash:
+                raise ConflictError(
+                    f"流水号 {retained_clash['sequence_no']} 属于已清理的"
+                    f" {retained_clash['month']} 月流水，流水号必须全局唯一，不得复用"
+                )
         frozen_at = now_str()
         try:
             conn.execute(
@@ -288,6 +300,10 @@ def ingest_month(conn, raw, filename, expected_month=None):
 
 def list_months(conn):
     return conn.execute(
-        "SELECT m.month, m.row_count, m.total_boxes, m.frozen_at, m.source_filename"
-        " FROM months m ORDER BY m.month DESC"
+        "SELECT m.month, m.row_count, m.total_boxes, m.frozen_at, m.source_filename,"
+        "       (p.month IS NOT NULL) AS details_purged,"
+        "       p.purged_at AS details_purged_at"
+        " FROM months m"
+        " LEFT JOIN purged_months p ON p.month = m.month"
+        " ORDER BY m.month DESC"
     ).fetchall()

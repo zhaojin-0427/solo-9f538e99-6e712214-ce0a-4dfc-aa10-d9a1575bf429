@@ -8,7 +8,7 @@
     <h2>已固定月份</h2>
     {% if months %}
       <table>
-        <thead><tr><th>月份</th><th>行数</th><th>箱数</th><th>固定时刻</th><th></th></tr></thead>
+        <thead><tr><th>月份</th><th>行数</th><th>箱数</th><th>固定时刻</th><th>明细状态</th><th></th></tr></thead>
         <tbody>
         {% for month in months %}
           <tr>
@@ -16,6 +16,13 @@
             <td>{{ month.row_count }}</td>
             <td>{{ month.total_boxes }}</td>
             <td class="mono">{{ display_utc(month.frozen_at) }}</td>
+            <td>
+              {% if month.details_purged %}
+                <span class="badge badge-warn" title="清理于 {{ display_utc(month.details_purged_at) }}">明细已清理</span>
+              {% else %}
+                <span class="badge">逐笔在线</span>
+              {% endif %}
+            </td>
             <td><a href="{{ url_for('report_page', month=month.month) }}">核对月报</a></td>
           </tr>
         {% endfor %}
@@ -61,6 +68,7 @@
     <li>温区按 SKU 登记 <code>[起, 止)</code> 区间，起含止不含；同一版同一 SKU 区间不得重叠。</li>
     <li>未落入任何区间的出库列在「未归类」，其箱数不计入任何温区。</li>
     <li>每次整组更正生成新知识版号；补登过去生效的区间只会改变新版汇总，旧版号返回原口径。</li>
+    <li>过保留期的月份可在月报页确认清理：移除逐笔流水，仅保留重算汇总与查重数据；清理后仍拒绝重传，旧流水号不得复用。</li>
   </ul>
 </section>
 {% endblock %}

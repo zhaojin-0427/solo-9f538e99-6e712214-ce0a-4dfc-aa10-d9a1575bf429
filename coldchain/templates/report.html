@@ -30,6 +30,9 @@
 {% elif report %}
   <section class="card">
     <h2>{{ report.month }} 汇总
+      {% if report.details_purged %}
+        <span class="badge badge-warn">明细已清理</span>
+      {% endif %}
       {% if report.version %}
         <span class="badge">口径 v{{ report.version.version_no }}</span>
       {% else %}
@@ -41,6 +44,13 @@
       共 {{ report.total_shipments }} 条出库 / {{ report.total_boxes }} 箱。
       {% if report.version %}所用版号创建于 {{ display_utc(report.version.created_at) }}，原因：{{ report.version.reason }}。{% endif %}
     </p>
+    {% if report.details_purged %}
+      <div class="flash flash-success">
+        该月逐笔流水已于 {{ display_utc(report.purged_at) }} 过保留期清理：在线库不再保存逐笔明细，
+        仅保留重算汇总与查重所需的精简数据。下表各温区与未归类的箱数、笔数仍按当前或任意历史知识版号口径统计，
+        但不再展示流水号等逐笔信息。
+      </div>
+    {% endif %}
     <div class="totals">
       <div><span class="label">已归类</span><strong>{{ report.classified_boxes }}</strong> 箱</div>
       <div><span class="label">未归类</span><strong>{{ report.unclassified.boxes }}</strong> 箱</div>
@@ -54,13 +64,13 @@
       <tbody>
       {% for bucket in report.zones %}
         <tr>
-          <td><a href="#zone-{{ loop.index }}">{{ bucket.zone }}</a></td>
+          <td>{% if not report.details_purged %}<a href="#zone-{{ loop.index }}">{% endif %}{{ bucket.zone }}{% if not report.details_purged %}</a>{% endif %}</td>
           <td><strong>{{ bucket.boxes }}</strong></td>
           <td>{{ bucket.shipment_count }}</td>
         </tr>
       {% endfor %}
       <tr class="unclassified-row">
-        <td><a href="#unclassified">未归类</a></td>
+        <td>{% if not report.details_purged %}<a href="#unclassified">{% endif %}未归类{% if not report.details_purged %}</a>{% endif %}</td>
         <td><strong>{{ report.unclassified.boxes }}</strong></td>
         <td>{{ report.unclassified.shipment_count }}</td>
       </tr>
@@ -68,6 +78,7 @@
     </table>
   </section>
 
+  {% if not report.details_purged %}
   {% for bucket in report.zones %}
     <section class="card" id="zone-{{ loop.index }}">
       <h2>温区 {{ bucket.zone }} · {{ bucket.boxes }} 箱</h2>
@@ -118,5 +129,47 @@
       <p class="muted">没有未归类的出库。</p>
     {% endif %}
   </section>
+  {% else %}
+    <p class="muted">该月逐笔明细已清理，故不再提供流水号级列表；温区与未归类的箱数、笔数汇总如上，且随所选知识版号口径重算。</p>
+  {% endif %}
+
+  <section class="card" id="purge">
+    <h2>月结明细保留期清理</h2>
+    {% if report.details_purged %}
+      <p class="muted">
+        该月已于 {{ display_utc(report.purged_at) }} 完成清理。重复确认只会沿用既有清理结果，不会再次改动数据；
+        该月仍拒绝重传，其流水号也不可被其他月份复用。
+      </p>
+      <form method="post" action="{{ url_for('report_purge') }}" class="inline"
+            data-confirm="该月明细此前已清理，再次确认仅沿用既有结果，是否继续？">
+        <input type="hidden" name="month" value="{{ report.month }}">
+        <label class="grow"><input type="checkbox" name="confirm" value="true" required> 我已知悉明细已清理，再次确认沿用该结果</label>
+        <button type="submit" class="ghost">重复确认（幂等）</button>
+      </form>
+    {% else %}
+      <p class="muted">
+        清理将从在线库移除 <strong>{{ report.month }}</strong> 的全部逐笔流水（含流水号明细展示），
+        只保留按任意知识版号重算温区/未归类箱数与笔数所需的精简事实，以及用于查重的流水号。
+        清理后该月仍不可重传，已清理的流水号也不得在其他月份复用；此操作不可撤销。
+      </p>
+      <form method="post" action="{{ url_for('report_purge') }}" class="inline"
+            data-confirm="确认清理 {{ report.month }} 的逐笔流水？此操作不可撤销。">
+        <input type="hidden" name="month" value="{{ report.month }}">
+        <label class="grow"><input type="checkbox" name="confirm" value="true" required> 我确认该月结已过保留期，同意清理逐笔明细</label>
+        <button type="submit">确认清理该月明细</button>
+      </form>
+    {% endif %}
+  </section>
 {% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll('form[data-confirm]').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+      if (!window.confirm(form.getAttribute('data-confirm'))) {
+        event.preventDefault();
+      }
+    });
+  });
+</script>
 {% endblock %}

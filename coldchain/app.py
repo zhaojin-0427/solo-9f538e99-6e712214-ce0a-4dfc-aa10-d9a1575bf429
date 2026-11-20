@@ -17,7 +17,7 @@ from flask import (
     url_for,
 )
 
-from . import facts, knowledge
+from . import facts, knowledge, retention
 from .db import connect, db_path_from_env, init_db
 from .errors import ConflictError, NotFoundError, ValidationError
 from .timeutil import display_utc
@@ -256,6 +256,32 @@ def create_app(test_config=None):
             selected_version=version_param or "",
         )
 
+    @app.post("/report/purge")
+    def report_purge():
+        db = get_db()
+        month = request.form.get("month")
+        if not month:
+            raise ValidationError("缺少要清理的月份（month）")
+        result = retention.purge_month(
+            db,
+            month,
+            confirmed=request.form.get("confirm") or "",
+        )
+        if result["already_purged"]:
+            flash(
+                f"{result['month']} 的逐笔流水此前已清理（{result['purged_at']}），"
+                "本次确认沿用既有清理结果，未重复改动。",
+                "success",
+            )
+        else:
+            flash(
+                f"{result['month']} 明细已清理：在线库移除逐笔流水，保留"
+                f" {result['retained_row_count']} 条精简事实 /"
+                f" {result['retained_total_boxes']} 箱及查重流水号，月报仍可重算。",
+                "success",
+            )
+        return redirect(url_for("report_page", month=result["month"]))
+
     # ---------- API ----------
 
     @app.get("/api/months")
@@ -326,6 +352,19 @@ def create_app(test_config=None):
             raise ValidationError("缺少 month 参数（YYYY-MM）")
         report = knowledge.build_report(db, month, request.args.get("version") or None)
         return jsonify({"ok": True, **knowledge.report_json(report)})
+
+    @app.post("/api/months/<month>/purge")
+    def api_purge_month(month):
+        payload = request.get_json(silent=True)
+        confirmed = False
+        if isinstance(payload, dict):
+            confirmed = payload.get("confirm", False)
+        elif request.form:
+            confirmed = request.form.get("confirm", False)
+        result = retention.purge_month(get_db(), month, confirmed=confirmed)
+        result["ok"] = True
+        status = 200 if result["already_purged"] else 201
+        return jsonify(result), status
 
     @app.get("/api/audit")
     def api_audit():
